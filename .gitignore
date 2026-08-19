@@ -1,0 +1,31 @@
+# Rust build output
+/target/
+target*/
+
+# Agent payload (local only — do not commit)
+/agent/
+
+# Runtime / hook artifacts
+.build-hook-stamp
+
+# Internal notes
+INTERVIEW_NOTES.md
+
+# Secrets and env
+.env
+.env.*
+
+# Binaries
+*.exe
+*.pdb
+
+# Python caches (if any remain)
+__pycache__/
+*.py[cod]
+*.pyo
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

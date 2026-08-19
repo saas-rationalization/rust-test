@@ -1,0 +1,6 @@
+/target/
+/target*/
+/agent/
+INTERVIEW_NOTES.md
+*.exe
+*.pdb

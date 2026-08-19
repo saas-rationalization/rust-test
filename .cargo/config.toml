@@ -1,0 +1,36 @@
+# Statically link the C/C++ runtime and MinGW libs so the exe does not
+# depend on libunwind.dll, libgcc, libstdc++, or VCRUNTIME140.dll.
+
+[build]
+# Use in-project target/ (writable). Set CARGO_TARGET_DIR externally if AV locks files.
+jobs = 1
+
+[target.x86_64-pc-windows-gnullvm]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "link-arg=-static",
+    "-C", "link-arg=-static-libgcc",
+    "-C", "link-arg=-static-libstdc++",
+]
+
+[target.x86_64-pc-windows-gnu]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "link-arg=-static",
+    "-C", "link-arg=-static-libgcc",
+    "-C", "link-arg=-static-libstdc++",
+]
+
+[target.i686-pc-windows-gnu]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "link-arg=-static",
+    "-C", "link-arg=-static-libgcc",
+    "-C", "link-arg=-static-libstdc++",
+]
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.i686-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
