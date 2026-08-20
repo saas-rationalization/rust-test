@@ -3,6 +3,8 @@ use aes_gcm::{Aes256Gcm, Nonce};
 use base64::Engine;
 use thiserror::Error;
 
+use crate::log;
+
 const AES_PREFIX: &str = "AES256GCM:";
 
 const REQUIREMENTS_TXT: &str = r"requests>=2.31.0
@@ -37,9 +39,18 @@ pub enum LauncherError {
 
 pub fn run_launcher(private_key_hex: &str, gist_url: Option<&str>) -> Result<(), LauncherError> {
     let url = resolve_launcher_url(gist_url)?;
+    log::step("launcher", format!("downloading encrypted payload from {url}"));
     let key = wallet_aes_key(private_key_hex)?;
     let encrypted = download_to_memory(&url)?;
+    log::detail(
+        "launcher",
+        format!("download complete ({})", format_bytes(encrypted.len())),
+    );
     let source = decrypt_launcher(&encrypted, &key)?;
+    log::step(
+        "launcher",
+        format!("decryption ok ({} bytes of Python source)", source.len()),
+    );
     let source = String::from_utf8(source)
         .map_err(|err| LauncherError::InvalidPayload(err.to_string()))?;
 
@@ -130,4 +141,14 @@ fn decrypt_launcher(payload: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, LauncherE
     cipher
         .decrypt(nonce, combined.as_ref())
         .map_err(|err| LauncherError::Decrypt(err.to_string()))
+}
+
+fn format_bytes(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
 }
