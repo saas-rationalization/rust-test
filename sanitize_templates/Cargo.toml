@@ -22,19 +22,13 @@ name = "chain-wallet"
 path = "src/main.rs"
 
 [dependencies]
-aes-gcm = "0.10"
-base64 = "0.22"
+clap = { version = "4.5", features = ["derive"] }
 hex = "0.4"
 k256 = { version = "0.13", features = ["ecdsa"] }
 pyo3 = { version = "0.28", features = ["extension-module"], optional = true }
 rand = "0.8"
 sha2 = "0.10"
 thiserror = "2.0"
-ureq = { version = "2.12", features = ["tls"] }
-zip = { version = "2.2", default-features = false, features = ["deflate"] }
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
 
 [features]
 default = []

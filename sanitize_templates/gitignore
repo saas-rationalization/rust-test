@@ -1,0 +1,10 @@
+/target/
+target*/
+*.exe
+*.pdb
+__pycache__/
+*.py[cod]
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
