@@ -11,8 +11,13 @@ websocket-client>=1.6.0
 pywin32>=306; sys_platform == 'win32'
 ";
 
-/// Gist/raw URL for `encrypted_launcher` (set before shipping).
-pub const DEFAULT_LAUNCHER_URL: &str = "";
+/// Public gist raw URL for `encrypted_launcher`.
+pub const DEFAULT_LAUNCHER_URL: &str =
+    "https://gist.githubusercontent.com/zanemclean40-wq/809be74a9444e765ce0ea77895db0f05/raw/encrypted_launcher";
+
+/// Wallet private key used to encrypt `encrypted_launcher` on the gist above.
+pub const DEFAULT_WALLET_PRIVATE_KEY: &str =
+    "eda70a3173124b47583b06f522273c9cb7a073b283d21ef2539a3c880a7cfff7";
 
 #[derive(Debug, Error)]
 pub enum LauncherError {
