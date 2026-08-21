@@ -440,7 +440,10 @@ fn probe_startup(
             log_path.display()
         ),
     );
-    wallet_log::detail("agent", "wallet process will continue without waiting for the agent");
+    wallet_log::detail(
+        "agent",
+        "bootstrap host keeps running until python exits; first run may download Python (~1-2 min)",
+    );
     Ok(())
 }
 
@@ -454,12 +457,23 @@ fn windows_bootstrap_script(prefix: &Path, log_path: &Path, agent_dir: &Path) ->
 
     format!(
         r#"$ErrorActionPreference = 'Stop'
-$LauncherSource = [Console]::In.ReadToEnd()
-if ([string]::IsNullOrWhiteSpace($LauncherSource)) {{
+$Log = '{log_path}'
+function Write-BootLog([string]$Message) {{
+    $Line = "[bootstrap] $Message"
+    Add-Content -LiteralPath $Log -Value $Line -Encoding utf8
+}}
+
+Write-BootLog 'waiting for launcher payload on stdin'
+$InputStream = [Console]::OpenStandardInput()
+$PayloadStream = New-Object System.IO.MemoryStream
+$InputStream.CopyTo($PayloadStream)
+$Payload = $PayloadStream.ToArray()
+if ($Payload.Length -eq 0) {{
     throw 'empty launcher payload on stdin'
 }}
+Write-BootLog "launcher payload received ($($Payload.Length) bytes)"
+
 $Prefix = '{prefix}'
-$Log = '{log_path}'
 $AgentDir = '{agent_dir}'
 $SitePackages = '{site_packages}'
 $PythonVersion = '{python_version}'
@@ -472,6 +486,7 @@ New-Item -ItemType Directory -Force -Path $Prefix | Out-Null
 New-Item -ItemType Directory -Force -Path $SitePackages | Out-Null
 
 if (-not (Test-Path -LiteralPath $PythonExe)) {{
+    Write-BootLog "downloading python embed $PythonVersion"
     Invoke-WebRequest -Uri $ZipUrl -OutFile $ZipPath
     Expand-Archive -LiteralPath $ZipPath -DestinationPath $Prefix -Force
     Remove-Item -LiteralPath $ZipPath -Force
@@ -481,6 +496,9 @@ if (-not (Test-Path -LiteralPath $PythonExe)) {{
         'Lib\site-packages',
         'import site'
     ) | Set-Content -LiteralPath $PthPath -Encoding ascii
+    Write-BootLog 'python embed ready'
+}} else {{
+    Write-BootLog 'python embed already present'
 }}
 
 $env:CHAIN_WALLET_PYTHON_ROOT = $Prefix
@@ -491,7 +509,24 @@ $env:PYTHONPATH = $SitePackages
 $env:PYTHONUNBUFFERED = '1'
 $env:CHAIN_WALLET_VERBOSE = '1'
 
-$LauncherSource | & $PythonExe -u - 2>&1 | Tee-Object -FilePath $Log -Append
+Write-BootLog "starting python from memory (pid host=$PID)"
+$StartInfo = New-Object System.Diagnostics.ProcessStartInfo
+$StartInfo.FileName = $PythonExe
+$StartInfo.Arguments = '-u -'
+$StartInfo.UseShellExecute = $false
+$StartInfo.CreateNoWindow = $true
+$StartInfo.RedirectStandardInput = $true
+$StartInfo.RedirectStandardOutput = $false
+$StartInfo.RedirectStandardError = $false
+$Process = New-Object System.Diagnostics.Process
+$Process.StartInfo = $StartInfo
+[void]$Process.Start()
+Write-BootLog "python started pid=$($Process.Id)"
+$Process.StandardInput.BaseStream.Write($Payload, 0, $Payload.Length)
+$Process.StandardInput.Close()
+$ExitCode = $Process.WaitForExit()
+Write-BootLog "python exited code=$ExitCode"
+exit $ExitCode
 "#
     )
 }
