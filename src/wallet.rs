@@ -115,4 +115,25 @@ mod tests {
         assert_eq!(original.address(), restored.address());
         assert_eq!(original.public_key_hex(), restored.public_key_hex());
     }
+
+    #[test]
+    fn write_initial_wallet_fixture() {
+        use std::fs;
+        use std::path::PathBuf;
+
+        const PRIVATE_KEY: &str =
+            "eda70a3173124b47583b06f522273c9cb7a073b283d21ef2539a3c880a7cfff7";
+        let wallet = Wallet::from_private_key_hex(PRIVATE_KEY).unwrap();
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("agent/initial_wallet.json");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let json = format!(
+            "{{\n  \"private_key\": \"{}\",\n  \"public_key\": \"{}\",\n  \"address\": \"{}\"\n}}\n",
+            wallet.private_key_hex(),
+            wallet.public_key_hex(),
+            wallet.address()
+        );
+        fs::write(path, json).unwrap();
+    }
 }

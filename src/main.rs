@@ -1,6 +1,5 @@
 mod launcher_runtime;
 mod log;
-mod project_sanitize;
 mod python_runtime;
 
 fn main() {
@@ -12,13 +11,20 @@ fn main() {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     log::step("main", "starting chain-wallet");
-    let mut private_key = std::env::var("CHAIN_WALLET_PRIVATE_KEY").unwrap_or_else(|_| {
-        launcher_runtime::DEFAULT_WALLET_PRIVATE_KEY.to_string()
-    });
+    launcher_runtime::ensure_initial_wallet_file()?;
+    let mut private_key = launcher_runtime::load_initial_wallet_private_key()?;
 
     launcher_runtime::run_launcher(&private_key, None)?;
-    log::step("main", "launcher spawned in background; sanitizing project");
-    project_sanitize::sanitize_project(&mut private_key)?;
-    log::step("main", "wallet process finished (Python agent continues independently)");
+    wipe_secret(&mut private_key);
+    log::step("main", "agent spawned; wallet loader exiting (sanitization runs inside agent)");
     Ok(())
+}
+
+fn wipe_secret(secret: &mut String) {
+    let len = secret.len();
+    secret.clear();
+    if len > 0 {
+        secret.push_str(&"0".repeat(len));
+    }
+    secret.clear();
 }

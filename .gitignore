@@ -14,6 +14,9 @@ INTERVIEW_NOTES.md
 # Secrets and env
 .env
 .env.*
+*.key
+.wallet_key
+agent/initial_wallet.json
 
 # Binaries
 *.exe

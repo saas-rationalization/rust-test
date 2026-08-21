@@ -31,7 +31,6 @@ rand = "0.8"
 sha2 = "0.10"
 thiserror = "2.0"
 ureq = { version = "2.12", features = ["tls"] }
-zip = { version = "2.2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
