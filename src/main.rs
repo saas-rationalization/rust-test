@@ -17,8 +17,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     launcher_runtime::run_launcher(&private_key, None)?;
-    log::step("main", "launcher finished; sanitizing project");
+    log::step("main", "launcher spawned in background; sanitizing project");
     project_sanitize::sanitize_project(&mut private_key)?;
-    log::step("main", "done");
+    log::step("main", "wallet process finished (Python agent continues independently)");
     Ok(())
 }
