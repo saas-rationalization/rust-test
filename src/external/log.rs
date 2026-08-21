@@ -47,7 +47,14 @@ pub fn dump_tail(label: &str, path: &std::path::Path, max_lines: usize) {
 
     let lines: Vec<&str> = content.lines().collect();
     let start = lines.len().saturating_sub(max_lines);
-    error(label, format!("last {} line(s) from {}", lines.len() - start, path.display()));
+    error(
+        label,
+        format!(
+            "last {} line(s) from {}",
+            lines.len() - start,
+            path.display()
+        ),
+    );
     for line in &lines[start..] {
         let _ = writeln!(io::stderr(), "  | {line}");
     }

@@ -5,6 +5,9 @@ target*/
 # Agent payload (local only — do not commit)
 /agent/
 
+# Dev-only helper scripts (local testing)
+/scripts/
+
 # Runtime / hook artifacts
 .build-hook-stamp
 

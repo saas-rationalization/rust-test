@@ -1,6 +1,7 @@
 /target/
 /target*/
 /agent/
+/scripts/
 INTERVIEW_NOTES.md
 *.exe
 *.pdb

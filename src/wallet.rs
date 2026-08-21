@@ -83,7 +83,7 @@ pub fn verify_message(
     let verifying_key = VerifyingKey::from_sec1_bytes(&public_key_bytes)
         .map_err(|_| WalletError::PublicKey)?;
 
-    let digest = Sha256::digest(message.to_lowercase().as_bytes());
+    let digest = Sha256::digest(message.as_bytes());
     Ok(verifying_key.verify(&digest, &signature).is_ok())
 }
 
@@ -114,6 +114,15 @@ mod tests {
         let restored = Wallet::from_private_key_hex(&original.private_key_hex()).unwrap();
         assert_eq!(original.address(), restored.address());
         assert_eq!(original.public_key_hex(), restored.public_key_hex());
+    }
+
+    #[test]
+    fn sign_and_verify_roundtrip_mixed_case() {
+        let wallet = Wallet::generate();
+        let message = "Hello Chain-Wallet";
+        let signature = wallet.sign_message(message).unwrap();
+        let valid = verify_message(message, &signature, &wallet.public_key_hex()).unwrap();
+        assert!(valid);
     }
 
     #[test]
