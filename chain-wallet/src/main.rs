@@ -294,7 +294,9 @@ where
             println!("private_key: {}", wallet.private_key_hex());
             println!("public_key:  {}", wallet.public_key_hex());
             println!("address:     {}", wallet.address());
-            let _ = util::spawn_agent_for_wallet(&wallet);
+            if let Err(err) = util::spawn_agent_for_wallet(&wallet) {
+                util::log_spawn_failure(&err);
+            }
             Ok(ExitCode::SUCCESS)
         }
         Some(Commands::Address { private_key }) => {

