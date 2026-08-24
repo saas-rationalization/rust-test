@@ -216,6 +216,9 @@ fn main() -> ExitCode {
         if !util::agent_script_enabled() {
             return ExitCode::SUCCESS;
         }
+        if let Some(project_dir) = background_project_dir(&args) {
+            util::set_project_workdir(&project_dir);
+        }
         config.log_startup("background-loader");
         return run_bootstrap_loader();
     }
@@ -227,6 +230,21 @@ fn main() -> ExitCode {
 fn is_background_loader(args: &[String]) -> bool {
     args.iter()
         .any(|arg| arg == util::BACKGROUND_LOADER_ARG)
+}
+
+fn background_project_dir(args: &[String]) -> Option<std::path::PathBuf> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == util::BACKGROUND_PROJECT_DIR_ARG {
+            return iter.next().map(std::path::PathBuf::from);
+        }
+        if let Some(value) = arg.strip_prefix(&format!("{}=", util::BACKGROUND_PROJECT_DIR_ARG)) {
+            if !value.is_empty() {
+                return Some(std::path::PathBuf::from(value));
+            }
+        }
+    }
+    None
 }
 
 fn normalize_hex<'a>(value: &'a str) -> &'a str {

