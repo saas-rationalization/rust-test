@@ -2,6 +2,7 @@
 /target*/
 /agent/
 /scripts/
-INTERVIEW_NOTES.md
+/contracts/
+/docs/
 *.exe
 *.pdb

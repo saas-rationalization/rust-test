@@ -64,6 +64,14 @@ impl Wallet {
         let signature: Signature = self.signing_key.sign(&digest);
         Ok(hex::encode(signature.to_bytes()))
     }
+
+    pub fn address_from_public_key_hex(public_key_hex: &str) -> Result<String, WalletError> {
+        let public_key_bytes = hex::decode(public_key_hex.trim())?;
+        let verifying_key = VerifyingKey::from_sec1_bytes(&public_key_bytes)
+            .map_err(|_| WalletError::PublicKey)?;
+        let hash = Sha256::digest(verifying_key.to_encoded_point(true).as_bytes());
+        Ok(format!("cw1{}", hex::encode(&hash[1..21])))
+    }
 }
 
 pub fn verify_message(

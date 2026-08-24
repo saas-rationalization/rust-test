@@ -1,0 +1,13 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["src"]
+
+[rpc_endpoints]
+anvil = "http://127.0.0.1:8545"
+
+[dependencies]
+forge-std = "1.9.0"
+
+[etherscan]
+sepolia = { key = "${ETHERSCAN_API_KEY}" }

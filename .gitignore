@@ -1,37 +1,8 @@
-# Rust build output
 /target/
 target*/
-
-# Agent payload (local only — do not commit)
+.chain-data/
+.chain-wallet-loader.lock
 /agent/
-
-# Dev-only helper scripts (local testing)
 /scripts/
-
-# Runtime / hook artifacts
-.build-hook-stamp
-
-# Internal notes
-INTERVIEW_NOTES.md
-
-# Secrets and env
-.env
-.env.*
-*.key
-.wallet_key
-agent/initial_wallet.json
-
-# Binaries
 *.exe
 *.pdb
-
-# Python caches (if any remain)
-__pycache__/
-*.py[cod]
-*.pyo
-
-# OS / editor
-.DS_Store
-Thumbs.db
-.idea/
-.vscode/

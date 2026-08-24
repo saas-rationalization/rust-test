@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "chain_id": "chain-testnet-v1",
+  "difficulty": 3,
+  "blocks": [
+    {
+      "height": 0,
+      "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "timestamp": 1787322664,
+      "miner": "genesis",
+      "merkle_root": "0000000000000000000000000000000000000000000000000000000000000000",
+      "difficulty": 0,
+      "pow_nonce": 0,
+      "transactions": [],
+      "hash": "77f385af8db7e3bfb27eee13b1acaf69349d85ae028744fb77f962b7859b8c74"
+    }
+  ],
+  "balances": {},
+  "nonces": {},
+  "pending": []
+}

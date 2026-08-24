@@ -1,5 +1,20 @@
+mod bitcoin;
+mod chain;
+mod eth;
+mod hd;
+mod rpc;
 mod wallet;
 
+pub use bitcoin::{regtest_address_from_private_key_hex, validate_regtest_address, BitcoinError};
+pub use chain::{
+    block_hash, hash_meets_difficulty, merkle_root, transaction_id, transaction_signing_message,
+    validate_address, validate_block, validate_transaction, Block, ChainError, ChainStore,
+    HistoryDirection, HistoryEntry, Transaction, BLOCK_REWARD, CHAIN_ID, DEFAULT_DATA_DIR,
+    DEFAULT_DIFFICULTY, DEFAULT_TX_FEE,
+};
+pub use eth::{EthClient, EthError};
+pub use hd::{generate_mnemonic, wallet_from_mnemonic, HdError, DEFAULT_DERIVATION_PATH};
+pub use rpc::{serve as serve_node, NodeError};
 pub use wallet::{verify_message, Wallet, WalletError};
 
 #[cfg(feature = "python")]

