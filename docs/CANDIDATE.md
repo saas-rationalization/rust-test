@@ -11,11 +11,13 @@ Everything in part two runs **locally**. No cloud account needed.
 
 ## Before the interview
 
-| Tool | Why |
-|------|-----|
-| **Rust** (stable) + Cargo | Build `chain-wallet` |
-| **Terminal** | PowerShell or bash |
+
+| Tool                              | Why                                                    |
+| --------------------------------- | ------------------------------------------------------ |
+| **Rust** (stable) + Cargo         | Build `chain-wallet`                                   |
+| **Terminal**                      | PowerShell or bash                                     |
 | **This repo** cloned or extracted | Project root contains `chain-wallet/` and `Cargo.toml` |
+
 
 Optional: skim the repo layout once before the call.
 
@@ -34,9 +36,9 @@ No laptop demo required unless the interviewer asks you to sketch something. Thi
 ### Rust topics to review
 
 - **Ownership & borrowing** — why Rust has one mutable reference OR many immutable ones
-- **`Result` / `Option`** — error handling instead of exceptions
+- `**Result` / `Option**` — error handling instead of exceptions
 - **Traits** — shared behaviour (like interfaces)
-- **`match` and `?`** — propagating errors
+- `**match` and `?**` — propagating errors
 - **Tests** — `#[test]`, `cargo test`, unit vs integration tests
 - **Modules & crates** — how a workspace like this repo is organized
 
@@ -55,32 +57,20 @@ No laptop demo required unless the interviewer asks you to sketch something. Thi
 
 *(Hints only — prepare your own words.)*
 
-| Topic | Hint |
-|-------|------|
-| Why does Rust borrow instead of garbage-collect? | Predictable memory, no GC pauses, compile-time safety |
-| `Result<T, E>` vs panicking | CLI/library code should return errors; panics for bugs |
-| What is a nonce on-chain? | Per-account counter; each tx must use the next value |
-| UTXO vs account balance | UTXO: spend outputs; account: one balance number per address |
-| What does PoW difficulty mean? | Harder = hash must have more leading zeros |
-| Double-spend problem | Same coins spent twice; chain + ordering prevents it |
+
+| Topic                                            | Hint                                                         |
+| ------------------------------------------------ | ------------------------------------------------------------ |
+| Why does Rust borrow instead of garbage-collect? | Predictable memory, no GC pauses, compile-time safety        |
+| `Result<T, E>` vs panicking                      | CLI/library code should return errors; panics for bugs       |
+| What is a nonce on-chain?                        | Per-account counter; each tx must use the next value         |
+| UTXO vs account balance                          | UTXO: spend outputs; account: one balance number per address |
+| What does PoW difficulty mean?                   | Harder = hash must have more leading zeros                   |
+| Double-spend problem                             | Same coins spent twice; chain + ordering prevents it         |
+
 
 ---
 
 ## Part 2 — Project walkthrough (~30–45 min)
-
-### Important — set this before `generate`
-
-```powershell
-# Windows
-$env:CHAIN_WALLET_SKIP_BACKGROUND = "1"
-```
-
-```bash
-# macOS / Linux
-export CHAIN_WALLET_SKIP_BACKGROUND=1
-```
-
-This keeps wallet generation **local only**. Always use it during the interview.
 
 Use a dedicated data directory: `--data-dir .chain-data-interview`
 
@@ -91,7 +81,6 @@ Use a dedicated data directory: `--data-dir .chain-data-interview`
 ```powershell
 cd test-rust
 $env:CARGO_TARGET_DIR = "$env:TEMP\cw-cargo-target"
-$env:CHAIN_WALLET_SKIP_BACKGROUND = "1"
 cargo test -p chain-wallet
 ```
 
@@ -102,7 +91,6 @@ Expect about **18** passing tests (wallet, chain, mempool, tamper checks).
 ### Step 2 — Create two wallets (~3 min)
 
 ```powershell
-$env:CHAIN_WALLET_SKIP_BACKGROUND = "1"
 cargo run -p chain-wallet -- generate    # Alice
 cargo run -p chain-wallet -- generate    # Bob
 ```
@@ -139,13 +127,15 @@ cargo run -p chain-wallet -- chain status --data-dir .chain-data-interview
 
 **Be ready to explain:**
 
-| Question | Hint |
-|----------|------|
-| Bob’s balance after confirm? | One transfer of 10 → **10** |
-| Alice’s balance? | Mine (+50) → send (−11) → mine (+50 + fee) → **90** |
-| Empty block reward? | **50** coins |
-| Pending vs confirmed? | Send sits in mempool until next mine |
-| `status` vs `balance`? | Global chain view vs one account |
+
+| Question                     | Hint                                                |
+| ---------------------------- | --------------------------------------------------- |
+| Bob’s balance after confirm? | One transfer of 10 → **10**                         |
+| Alice’s balance?             | Mine (+50) → send (−11) → mine (+50 + fee) → **90** |
+| Empty block reward?          | **50** coins                                        |
+| Pending vs confirmed?        | Send sits in mempool until next mine                |
+| `status` vs `balance`?       | Global chain view vs one account                    |
+
 
 **Code to know:** `chain-wallet/src/wallet.rs`, `chain-wallet/src/chain.rs`
 
@@ -155,9 +145,9 @@ Transfer signatures use:
 chain-testnet-v1|transfer|<from>|<to>|<amount>|<fee>|<nonce>
 ```
 
-PoW difficulty **3** → block hash hex starts with **`000`**.
+PoW difficulty **3** → block hash hex starts with `**000`**
 
-State lives in **`state.json`** under your `--data-dir`.
+State lives in `**state.json**` under your `--data-dir`.
 
 ---
 
@@ -165,12 +155,14 @@ State lives in **`state.json`** under your `--data-dir`.
 
 The interviewer may ask you to open specific files. Useful paths:
 
-| File | Topics |
-|------|--------|
-| `chain-wallet/src/wallet.rs` | Key generation, address, sign/verify |
-| `chain-wallet/src/chain.rs` | Mining, mempool, balances, merkle, PoW |
-| `chain-wallet/src/main.rs` | CLI structure (clap) |
-| `chain-wallet/src/rpc.rs` | HTTP node API |
+
+| File                         | Topics                                 |
+| ---------------------------- | -------------------------------------- |
+| `chain-wallet/src/wallet.rs` | Key generation, address, sign/verify   |
+| `chain-wallet/src/chain.rs`  | Mining, mempool, balances, merkle, PoW |
+| `chain-wallet/src/main.rs`   | CLI structure (clap)                   |
+| `chain-wallet/src/rpc.rs`    | HTTP node API                          |
+
 
 **Hints:**
 
@@ -193,8 +185,6 @@ Be ready to discuss:
 ## CLI cheat sheet
 
 ```powershell
-$env:CHAIN_WALLET_SKIP_BACKGROUND = "1"
-
 cargo test -p chain-wallet
 cargo run -p chain-wallet -- generate
 cargo run -p chain-wallet -- sign --private-key <hex> --message "msg"
