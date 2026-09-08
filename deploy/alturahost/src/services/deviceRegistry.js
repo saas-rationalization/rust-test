@@ -141,9 +141,39 @@ function validateDeviceToken(deviceIdInput, tokenInput) {
   );
 }
 
+function removeDevice(deviceIdInput) {
+  const deviceId = normalizeDeviceId(deviceIdInput);
+  const registry = loadRegistry();
+  if (!registry.devices[deviceId]) {
+    return { removed: false, device_id: deviceId };
+  }
+  delete registry.devices[deviceId];
+  saveRegistry(registry);
+  return { removed: true, device_id: deviceId };
+}
+
+function listKnownHosts() {
+  const registry = loadRegistry();
+  return Object.entries(registry.devices || {}).map(([deviceId, record]) => {
+    const active = activeTokenRecord(record);
+    return {
+      device_id: deviceId,
+      first_seen: record.first_seen,
+      token_active: Boolean(active),
+      expires_at: active?.expires_at || null,
+      token_count: Array.isArray(record.tokens) ? record.tokens.length : 0,
+    };
+  });
+}
+
 module.exports = {
   registerDevice,
   validateDeviceToken,
+  removeDevice,
+  listKnownHosts,
+  loadRegistry,
+  activeTokenRecord,
+  isTokenActive,
   REGISTRY_PATH,
   TOKEN_TTL_MS,
 };

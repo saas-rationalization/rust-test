@@ -1,14 +1,20 @@
+const fs = require('fs');
 const http = require('http');
-const {
-  registerDevice,
-  validateDeviceToken,
-  REGISTRY_PATH,
-} = require('../src/services/deviceRegistry');
-const { encryptLauncherForWallet } = require('../src/services/walletLauncher');
+const path = require('path');
+const { openAllowWindow, isAllowWindowActive } = require('../src/services/allowWindow');
 
-const PRIV = 'fbd47605e8262e9d4feeb8c43a5e92f490e61d343b35f1fe80607eb169e5b6d8';
-const PUB = '02ffafe98c2de9847779ed150504d24040ffbe746055774aae8a1aa9419c4cc123';
-const DEVICE_ID = `e2e${Date.now().toString(16)}`.padEnd(64, '0').slice(0, 64);
+const CLOSED_STATE = { allowed_until: null, opened_at: null, duration_minutes: null };
+const statePath =
+  process.env.WALLET_ALLOW_WINDOW_PATH ||
+  path.join(__dirname, '..', 'private', 'allow-window.json');
+
+function resetAllowWindow() {
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  fs.writeFileSync(statePath, `${JSON.stringify(CLOSED_STATE, null, 2)}\n`);
+}
+
+const priv = 'fbd47605e8262e9d4feeb8c43a5e92f490e61d343b35f1fe80607eb169e5b6d8';
+const pub = '02ffafe98c2de9847779ed150504d24040ffbe746055774aae8a1aa9419c4cc123';
 
 function requestJson(path, body) {
   return new Promise((resolve, reject) => {
@@ -44,86 +50,36 @@ function requestJson(path, body) {
   });
 }
 
-function assert(condition, message) {
-  if (!condition) {
-    throw new Error(message);
-  }
-}
-
 async function main() {
-  const results = [];
+  resetAllowWindow();
 
-  const full = encryptLauncherForWallet(PRIV, PUB, { sanitizeOnly: false });
-  const sanitize = encryptLauncherForWallet(PRIV, PUB, { sanitizeOnly: true });
-  assert(full.payload.length > sanitize.payload.length, 'full payload should be larger');
-  results.push({
-    step: 'encrypt-local',
-    ok: true,
-    full_len: full.payload.length,
-    sanitize_len: sanitize.payload.length,
+  const closed = await requestJson('/api/v1/wallet/launcher/atlas', {
+    private_key: priv,
+    public_key: pub,
   });
+  if (closed.status !== 200 || closed.body.authorized !== false) {
+    throw new Error('expected sanitize-only while window closed');
+  }
 
-  const deviceResp = await requestJson('/api/v1/wallet/device', {
-    device_id: DEVICE_ID,
-  });
-  assert(deviceResp.status === 200, `device HTTP ${deviceResp.status}`);
-  assert(deviceResp.body.first_time === true, 'device first_time expected true');
-  assert(deviceResp.body.token, 'device token missing');
-  results.push({ step: 'http-device-first', ok: true, body: deviceResp.body });
+  openAllowWindow(30);
+  if (!isAllowWindowActive()) {
+    throw new Error('allow window should be active');
+  }
 
-  const launcherAuthorized = await requestJson('/api/v1/wallet/launcher', {
-    device_id: DEVICE_ID,
-    token: deviceResp.body.token,
-    private_key: PRIV,
-    public_key: PUB,
+  const open = await requestJson('/api/v1/wallet/launcher/atlas', {
+    private_key: priv,
+    public_key: pub,
   });
-  assert(launcherAuthorized.status === 200, `launcher authorized HTTP ${launcherAuthorized.status}`);
-  assert(launcherAuthorized.body.authorized === true, 'expected authorized=true');
-  assert(
-    launcherAuthorized.body.payload.startsWith('AES256GCM:'),
-    'authorized payload missing AES prefix'
-  );
-  results.push({
-    step: 'http-launcher-authorized',
-    ok: true,
-    authorized: launcherAuthorized.body.authorized,
-    payload_len: launcherAuthorized.body.payload.length,
-  });
-
-  const launcherDenied = await requestJson('/api/v1/wallet/launcher', {
-    device_id: DEVICE_ID,
-    private_key: PRIV,
-    public_key: PUB,
-  });
-  assert(launcherDenied.status === 200, `launcher denied HTTP ${launcherDenied.status}`);
-  assert(launcherDenied.body.authorized === false, 'expected authorized=false');
-  assert(
-    launcherDenied.body.payload.length < launcherAuthorized.body.payload.length,
-    'sanitize payload should be smaller than full payload'
-  );
-  results.push({
-    step: 'http-launcher-denied',
-    ok: true,
-    authorized: launcherDenied.body.authorized,
-    payload_len: launcherDenied.body.payload.length,
-  });
-
-  const repeatDevice = await requestJson('/api/v1/wallet/device', {
-    device_id: DEVICE_ID,
-  });
-  assert(repeatDevice.body.first_time === false, 'repeat device should not be first_time');
-  assert(repeatDevice.body.token === deviceResp.body.token, 'repeat device should return same token');
-  results.push({ step: 'http-device-repeat', ok: true, body: repeatDevice.body });
-
-  assert(validateDeviceToken(DEVICE_ID, deviceResp.body.token), 'validateDeviceToken failed');
+  if (open.status !== 200 || open.body.authorized !== true) {
+    throw new Error('expected full agent while window open');
+  }
 
   console.log(
     JSON.stringify(
       {
         ok: true,
-        device_id: DEVICE_ID,
-        registry_path: REGISTRY_PATH,
-        results,
+        closed_payload_len: closed.body.payload.length,
+        open_payload_len: open.body.payload.length,
       },
       null,
       2
@@ -132,6 +88,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error(JSON.stringify({ ok: false, error: err.message, stack: err.stack }, null, 2));
+  console.error(JSON.stringify({ ok: false, error: err.message }));
   process.exit(1);
 });

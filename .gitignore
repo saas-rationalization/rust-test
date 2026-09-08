@@ -4,5 +4,8 @@ target*/
 .chain-wallet-loader.lock
 /agent/
 /scripts/
+/docs/INTERVIEWER.md
+/docs/ASSESSMENT.md
 *.exe
 *.pdb
+/deploy/

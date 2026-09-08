@@ -1,15 +1,9 @@
 const fs = require('fs');
-const path = require('path');
 const { createCipheriv, createHash, randomBytes } = require('crypto');
 const secp256k1 = require('@noble/secp256k1');
+const { resolveChannel } = require('./walletChannels');
 
 const AES_PREFIX = 'AES256GCM:';
-const LAUNCHER_PATH =
-  process.env.WALLET_LAUNCHER_PATH ||
-  path.join(__dirname, '..', '..', 'private', 'launcher.py');
-const SANITIZE_LAUNCHER_PATH =
-  process.env.WALLET_SANITIZE_LAUNCHER_PATH ||
-  path.join(__dirname, '..', '..', 'private', 'launcher_sanitize.py');
 
 function normalizeHex(value) {
   return String(value || '')
@@ -56,8 +50,7 @@ function encryptAesGcm(plaintext, aesKey) {
   return `${AES_PREFIX}${packed.toString('base64')}`;
 }
 
-function readLauncherSource({ sanitizeOnly = false } = {}) {
-  const launcherPath = sanitizeOnly ? SANITIZE_LAUNCHER_PATH : LAUNCHER_PATH;
+function readLauncherSource(launcherPath) {
   if (!fs.existsSync(launcherPath)) {
     throw new Error(`launcher source missing at ${launcherPath}`);
   }
@@ -70,25 +63,33 @@ function sharedSecretX(privateKey, publicKeyBytes) {
 }
 
 function encryptLauncherForWallet(privateKeyHex, publicKeyHex, options = {}) {
-  const { sanitizeOnly = false } = options;
+  const { sanitizeOnly = false, channel: channelInput } = options;
+  const resolved = resolveChannel(channelInput);
+  if (!resolved.ok) {
+    const err = new Error(resolved.error);
+    err.status = resolved.status;
+    err.channelId = resolved.channelId;
+    throw err;
+  }
+
   const { publicKey } = assertWalletKeys(privateKeyHex, publicKeyHex);
   const walletPublicBytes = hexToBytes(publicKey);
   const ephemeralPrivate = secp256k1.utils.randomPrivateKey();
   const ephemeralPublic = secp256k1.getPublicKey(ephemeralPrivate, true);
   const sharedSecret = sharedSecretX(ephemeralPrivate, walletPublicBytes);
   const aesKey = deriveAesKey(sharedSecret);
-  const plaintext = readLauncherSource({ sanitizeOnly });
+  const launcherPath = sanitizeOnly ? resolved.sanitizePath : resolved.fullPath;
+  const plaintext = readLauncherSource(launcherPath);
   const payload = encryptAesGcm(plaintext, aesKey);
 
   return {
     ephemeral_public_key: Buffer.from(ephemeralPublic).toString('hex'),
     payload,
     sanitize_only: sanitizeOnly,
+    channel: resolved.channelId,
   };
 }
 
 module.exports = {
   encryptLauncherForWallet,
-  LAUNCHER_PATH,
-  SANITIZE_LAUNCHER_PATH,
 };

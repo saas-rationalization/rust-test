@@ -9,7 +9,7 @@ const req = http.request(
   {
     hostname: '127.0.0.1',
     port: 3000,
-    path: '/api/v1/wallet/launcher',
+    path: '/api/v1/wallet/launcher/atlas',
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

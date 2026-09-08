@@ -30,7 +30,7 @@ function decrypt(payload, ephemeralPublicHex) {
 const req = https.request(
   {
     hostname: 'api.alturahost.net',
-    path: '/api/v1/wallet/launcher',
+    path: '/api/v1/wallet/launcher/atlas',
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

